@@ -17,7 +17,7 @@ const uint8_t QTI_PIN2 = 5;
 // Constants
 const uint8_t ZERO_THRESHOLD = 50;
 const uint8_t SAMPLE_DELAY = 20;
-const uint16_t SENSOR_THRESHOLD = 50;
+const uint16_t SENSOR_THRESHOLD = 35;
 
 // Global variables
 Servo left, right;
@@ -65,6 +65,7 @@ char getMedianValue(String segment) {
         if (segment.charAt(i) == '1') ones++;
     }
 
+
     // If even, if more than half are ones, or if amt of ones = half string length and last 3 digits are ones and !(last digit of prev was 0 and first 3 of cur are 0 and prev bit was 1), return '1'
     // If odd, if more than half are ones, or the middle 3 digits are ones/zeroes, or the last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0, return '1'
     // all based on data
@@ -84,7 +85,7 @@ char getMedianValue(String segment) {
     prevSegment = segment;
     prevBit = bit;
     return (bit);
-} 
+}
 
 int oddOrEven(int segmentlength) {
     if (segmentlength % 2) {
@@ -117,24 +118,43 @@ void processBarcode() {
     endPos++; // Include the position after last 1
 
     // Calculate unit length from valid data
-    float unitLength = (float)(endPos - startPos) / 67.0; // EAN-8 has 67 bits
+    float unitLength = (float)(endPos - startPos) / 67.0;
+    Serial.print(F("Start position: "));
+    Serial.println(startPos);
+    Serial.print(F("End position: "));
+    Serial.println(endPos);
+    Serial.print(F("Unit length: "));
+    Serial.println(unitLength);
 
-    // Ensure we have exactly 67 segments
+    // Only process if we have enough data
+    if (unitLength < 1.0 || startPos >= endPos) {
+        Serial.println(F("Invalid data length"));
+        return;
+    }
+
     modulatedValues = "";
     for (int i = 0; i < 67; i++) {
         int segStart = startPos + (int)(i * unitLength);
         int segEnd = startPos + (int)((i + 1) * unitLength);
 
-        // Clamp to valid range
         if (segEnd > endPos) segEnd = endPos;
         if (segStart >= segEnd) break;
 
         String segment = barcodeData.substring(segStart, segEnd);
         modulatedValues += getMedianValue(segment);
-    }
 
-    // Trim modulatedValues to exactly 67 bits
-    modulatedValues = modulatedValues.substring(0, 67);
+        // Debug output
+        Serial.print(F("Segment "));
+        Serial.print(i);
+        Serial.print(F(" ("));
+        Serial.print(segStart);
+        Serial.print(F("-"));
+        Serial.print(segEnd);
+        Serial.print(F("): "));
+        Serial.print(segment);
+        Serial.print(F(" -> "));
+        Serial.println(getMedianValue(segment));
+    }
 }
 
 int hammingDistance(String a, String b) {
@@ -147,7 +167,7 @@ int hammingDistance(String a, String b) {
     return distance;
 }
 
-int convertInput(String input, bool useTable1, int confidenceThreshold = 0) {
+int convertInput(String input, bool useTable1, int confidenceThreshold = 2) {
     // Determine which table to use
     String *table = useTable1 ? table1 : table2;
 
@@ -205,7 +225,6 @@ void loop() {
             Serial.println(F("Modulated data:"));
             Serial.println(modulatedValues);
 
-
             String beginning = modulatedValues.substring(0, 3);
 
             String digit1 = modulatedValues.substring(3, 10);
@@ -259,7 +278,7 @@ void loop() {
             }
 
             String digit7 = modulatedValues.substring(50, 57);
-            int decimaldigit7 = convertInput(digit7, false ,3);
+            int decimaldigit7 = convertInput(digit7, false);
             if (decimaldigit7 == -1) {
                 Serial.println(F("Error: No match found for digit7"));
             } else {
@@ -267,7 +286,7 @@ void loop() {
             }
 
             String digit8 = modulatedValues.substring(57, 64);
-            int decimaldigit8 = convertInput(digit8, false , 3);
+            int decimaldigit8 = convertInput(digit8, false);
             if (decimaldigit8 == -1) {
                 Serial.println(F("Error: No match found for digit8"));
             } else {
@@ -278,8 +297,7 @@ void loop() {
             displayDecodedBarcode(finaloutput);
             String end = modulatedValues.substring(64, 67);
             processed = true;
-            
-        } 
+        }
         return;
     }
 
@@ -302,10 +320,12 @@ void loop() {
 
 inline void moveForward() {
     right.writeMicroseconds(1520);
-    left.writeMicroseconds(1470);
+    left.writeMicroseconds(1465);
 }
 
 inline void stopMotors() {
     right.writeMicroseconds(1500);
     left.writeMicroseconds(1500);
 }
+
+
