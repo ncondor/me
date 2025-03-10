@@ -23,13 +23,12 @@ const uint16_t SENSOR_THRESHOLD = 35;
 Servo left, right;
 uint8_t zeroCount = 0;
 bool readingActive = true;
-String barcodeData = "";    // Raw binary values
+String barcodeData = "";    // Raw binary values received from sensors
 String modulatedValues = ""; // Processed barcode data
 String prevSegment = "0";
 float prevBit = 0;
 
-// Initialize the LCD with the correct pins
-// RS, EN, D4, D5, D6, D7
+// Initialize the LCD with the correct pins (RS, EN, D4, D5, D6, D7)
 LiquidCrystal lcd(13, 12, 10, 9, 8, 7);
 
 // Barcode lookup tables
@@ -37,295 +36,311 @@ String table1[10] = {"0001101", "0011001", "0010011", "0111101", "0100011", "011
 String table2[10] = {"1110010", "1100110", "1101100", "1000010", "1011100", "1001110", "1010000", "1000100", "1001000", "1110100"};
 
 void setup() {
-    Serial.begin(9600);
-    left.attach(LEFT_SERVO_PIN);
-    right.attach(RIGHT_SERVO_PIN);
-    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
-    FastLED.setBrightness(BRIGHTNESS);
-    leds[0] = CRGB(255, 255, 255);
-    FastLED.show();
-    stopMotors();
-    delay(1000);
-    lcd.begin(16, 2);
+  Serial.begin(9600);
+  left.attach(LEFT_SERVO_PIN);
+  right.attach(RIGHT_SERVO_PIN);
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+  FastLED.setBrightness(BRIGHTNESS);
+  leds[0] = CRGB(255, 255, 255);
+  FastLED.show();
+  stopMotors();
+  delay(1000);
+  lcd.begin(16, 2);
 }
 
 inline uint16_t RCTime(const uint8_t sensorPin) {
-    uint16_t duration = 0;
-    pinMode(sensorPin, OUTPUT);
-    digitalWrite(sensorPin, HIGH);
-    delay(1);
-    pinMode(sensorPin, INPUT);
-    while (digitalRead(sensorPin) && duration < 1000) duration++;
-    return duration;
+  uint16_t duration = 0;
+  pinMode(sensorPin, OUTPUT);
+  digitalWrite(sensorPin, HIGH);
+  delay(1);
+  pinMode(sensorPin, INPUT);
+  while (digitalRead(sensorPin) && duration < 1000) duration++;
+  return duration;
 }
 
 char getMedianValue(String segment) {
-    float ones = 0;
-    for (unsigned int i = 0; i < segment.length(); i++) {
-        if (segment.charAt(i) == '1') ones++;
-    }
+  // Count number of '1's in the segment
+  float ones = 0;
+  for (unsigned int i = 0; i < segment.length(); i++) {
+    if (segment.charAt(i) == '1')
+      ones++;
+  }
 
+  int len = segment.length();
+  bool isEven = (len % 2 == 0);
+  bool result = false;
 
-    // If even, if more than half are ones, or if amt of ones = half string length and last 3 digits are ones and !(last digit of prev was 0 and first 3 of cur are 0 and prev bit was 1), return '1'
-    // If odd, if more than half are ones, or the middle 3 digits are ones/zeroes, or the last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0, return '1'
-    // all based on data
-    int bit = ( (oddOrEven(segment.length()) == 0                                                           // check if even
-    && (ones > segment.length()/2                                                                           // more than half are ones
-    || (ones == segment.length()/2) && segment.substring(3) == "111"                                        // half are ones, last 3 are 1s
-    || segment.substring(2) == "1111"
-    || (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == 1)             // last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0
-    && !(segment.substring(0,2) = "000" && prevBit == 1 && getLastCharacter(prevSegment) == 0)) )           // opposite of (last digit of prev was 0 and first 3 of cur are 0 and prev bit was 1)
-    ||  
-    ((oddOrEven(segment.length()) == 1                                                                      // check if odd
-    && ones > segment.length()/2)                                                                           // more than half are ones
-    || (segment.substring(2) == "11100")                                                                    // middle 3 are ones
-    || (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == 1)             // last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0
-    && !(segment.substring(2) == "00011")) ) ? '1' : '0';                                                   // opposite of (middle 3 are zeroes), return 1 else return 0
+  if (isEven) {
+    // Even length conditions
+    bool moreThanHalfOnes = (ones > len / 2);
+    bool halfOnesAndLast3Ones = ((ones == len / 2) && (segment.substring(3) == "111"));
+    bool fourOnesFromPos2 = (segment.substring(2) == "1111");
+    bool matchPrevPattern = (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == '1');
+    bool avoidPrevOpposite = !(segment.substring(0, 2) == "000" && prevBit == 1 && getLastCharacter(prevSegment) == '0');
 
-    prevSegment = segment;
-    prevBit = bit;
-    return (bit);
+    result = (moreThanHalfOnes || halfOnesAndLast3Ones || fourOnesFromPos2 || (matchPrevPattern && avoidPrevOpposite));
+  } else {
+    // Odd length conditions
+    bool moreThanHalfOnes = (ones > len / 2);
+    bool midPatternOnes = (segment.substring(2) == "11100"); // Interpretation: middle pattern condition
+    bool matchPrevPattern = (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == '1');
+    bool avoidMidOpposite = !(segment.substring(2) == "00011");
+
+    result = (moreThanHalfOnes || midPatternOnes || (matchPrevPattern && avoidMidOpposite));
+  }
+
+  char bit = result ? '1' : '0';
+  // Update previous segment variables for subsequent calls.
+  prevSegment = segment;
+  prevBit = bit;
+  return bit;
 }
 
-int oddOrEven(int segmentlength) {
-    if (segmentlength % 2) {
-        return 1; // odd
-    } else {
-        return 0; // even
-    }
-}
-
-int getLastCharacter(String str) {
-    int length = str.length();
-    if (length > 0) {
-        return str[length - 1];
-    }
-    return '\0';
+char getLastCharacter(String str) {
+  int length = str.length();
+  return (length > 0) ? str.charAt(length - 1) : '\0';
 }
 
 void processBarcode() {
-    // Find first significant 1
-    int startPos = 0;
-    while (startPos < barcodeData.length() && barcodeData.charAt(startPos) == '0') {
-        startPos++;
+  if (barcodeData.length() == 0) {
+    Serial.println(F("Error: No barcode data received."));
+    return;
+  }
+
+  // Find the first significant '1'
+  int startPos = 0;
+  while (startPos < barcodeData.length() && barcodeData.charAt(startPos) == '0') {
+    startPos++;
+  }
+  if (startPos >= barcodeData.length()) {
+    Serial.println(F("Error: No significant barcode markers found (startPos)."));
+    return;
+  }
+
+  // Find the last significant '1'
+  int endPos = barcodeData.length() - 1;
+  while (endPos >= 0 && barcodeData.charAt(endPos) == '0') {
+    endPos--;
+  }
+  if (endPos < 0) {
+    Serial.println(F("Error: No significant barcode markers found (endPos)."));
+    return;
+  }
+  endPos++; // Adjust to include the position after last '1'
+
+  // Calculate unit length from valid data segment (should be divided into 67 parts)
+  float unitLength = (float)(endPos - startPos) / 67.0;
+  Serial.print(F("Start position: "));
+  Serial.println(startPos);
+  Serial.print(F("End position: "));
+  Serial.println(endPos);
+  Serial.print(F("Unit length: "));
+  Serial.println(unitLength);
+
+  if (unitLength < 1.0) {
+    Serial.println(F("Error: Computed unit length is too short, data may be corrupt."));
+    return;
+  }
+
+  modulatedValues = "";
+  for (int i = 0; i < 67; i++) {
+    int segStart = startPos + (int)(i * unitLength);
+    int segEnd = startPos + (int)((i + 1) * unitLength);
+
+    if (segEnd > endPos) 
+      segEnd = endPos;
+    if (segStart >= segEnd) {
+      Serial.print(F("Warning: Segment "));
+      Serial.print(i);
+      Serial.println(F(" has invalid boundaries; skipping segment."));
+      continue;
     }
 
-    // Find last significant 1
-    int endPos = barcodeData.length() - 1;
-    while (endPos >= 0 && barcodeData.charAt(endPos) == '0') {
-        endPos--;
-    }
-    endPos++; // Include the position after last 1
+    String segment = barcodeData.substring(segStart, segEnd);
+    char median = getMedianValue(segment);
+    modulatedValues += median;
 
-    // Calculate unit length from valid data
-    float unitLength = (float)(endPos - startPos) / 67.0;
-    Serial.print(F("Start position: "));
-    Serial.println(startPos);
-    Serial.print(F("End position: "));
-    Serial.println(endPos);
-    Serial.print(F("Unit length: "));
-    Serial.println(unitLength);
-
-    // Only process if we have enough data
-    if (unitLength < 1.0 || startPos >= endPos) {
-        Serial.println(F("Invalid data length"));
-        return;
-    }
-
-    modulatedValues = "";
-    for (int i = 0; i < 67; i++) {
-        int segStart = startPos + (int)(i * unitLength);
-        int segEnd = startPos + (int)((i + 1) * unitLength);
-
-        if (segEnd > endPos) segEnd = endPos;
-        if (segStart >= segEnd) break;
-
-        String segment = barcodeData.substring(segStart, segEnd);
-        modulatedValues += getMedianValue(segment);
-
-        // Debug output
-        Serial.print(F("Segment "));
-        Serial.print(i);
-        Serial.print(F(" ("));
-        Serial.print(segStart);
-        Serial.print(F("-"));
-        Serial.print(segEnd);
-        Serial.print(F("): "));
-        Serial.print(segment);
-        Serial.print(F(" -> "));
-        Serial.println(getMedianValue(segment));
-    }
+    // Debug output for each processed segment
+    Serial.print(F("Segment "));
+    Serial.print(i);
+    Serial.print(F(" ("));
+    Serial.print(segStart);
+    Serial.print(F("-"));
+    Serial.print(segEnd);
+    Serial.print(F("): "));
+    Serial.print(segment);
+    Serial.print(F(" -> "));
+    Serial.println(median);
+  }
+  
+  if (modulatedValues.length() != 67) {
+    Serial.print(F("Error: Processed modulated data length ("));
+    Serial.print(modulatedValues.length());
+    Serial.println(F(") does not equal 67. Data may be incomplete or corrupt."));
+  }
 }
 
 int hammingDistance(String a, String b) {
-    int distance = 0;
-    for (int i = 0; i < a.length(); i++) {
-        if (a.charAt(i) != b.charAt(i)) {
-            distance++;
-        }
-    }
-    return distance;
+  int distance = 0;
+  for (int i = 0; i < a.length(); i++) {
+    if (a.charAt(i) != b.charAt(i))
+      distance++;
+  }
+  return distance;
 }
 
 int convertInput(String input, bool useTable1, int confidenceThreshold = 2) {
-    // Determine which table to use
-    String *table = useTable1 ? table1 : table2;
+  // Select the appropriate lookup table
+  String *table = useTable1 ? table1 : table2;
+  int bestMatchIndex = -1;
+  int bestDistance = input.length() + 1; // initialize with a large value
 
-    int bestMatchIndex = -1;
-    int bestDistance = input.length() + 1; // Initialize with a value larger than possible
-
-    // Compare input with table entries to find the closest match
-    for (int i = 0; i < 10; i++) {
-        int distance = hammingDistance(input, table[i]);
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            bestMatchIndex = i;
-        }
+  for (int i = 0; i < 10; i++) {
+    int distance = hammingDistance(input, table[i]);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestMatchIndex = i;
     }
-
-    // If the best match is within the confidence threshold, return the corresponding value
-    if (bestDistance <= confidenceThreshold) {
-        return bestMatchIndex;
-    } else {
-        return -1; // No match found within the confidence threshold
-    }
+  }
+  if (bestDistance > confidenceThreshold) {
+    Serial.print(F("Warning: No reliable match found for input "));
+    Serial.print(input);
+    Serial.print(F(" (best distance: "));
+    Serial.print(bestDistance);
+    Serial.println(F(")"));
+    return -1;
+  }
+  return bestMatchIndex;
 }
 
 void displayDecodedBarcode(String barcode) {
-    // Extract the checksum (last digit of the barcode)
-    char checksum = barcode[7];
+  if (barcode.length() < 8) {
+    Serial.println(F("Error: Decoded barcode length is insufficient."));
+    return;
+  }
+  // Extract checksum (last digit of decoded barcode)
+  char checksum = barcode[7];
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Barcode: ");
+  lcd.print(barcode);
+  lcd.setCursor(0, 1);
+  lcd.print("Checksum: ");
+  lcd.print(checksum);
 
-    // Clear the LCD and display the full barcode
-    lcd.clear();
-    lcd.setCursor(0, 0); // Set cursor to first row, first column
-    lcd.print("Barcode: ");
-    lcd.print(barcode);
-
-    // Display the checksum on the second row
-    lcd.setCursor(0, 1); // Set cursor to second row, first column
-    lcd.print("Checksum: ");
-    lcd.print(checksum);
-
-    // Wait for 10 seconds
-    delay(10000);
-
-    // Clear the screen and display "Event complete !!!"
-    lcd.clear();
-    lcd.setCursor(0, 0); // Set cursor to first row, first column
-    lcd.print("Event complete !!!");
+  delay(10000);
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Event complete !!!");
 }
 
 void loop() {
-    if (!readingActive) {
-        static bool processed = false;
-        if (!processed) {
-            processBarcode();
-            Serial.println(F("Raw data:"));
-            Serial.println(barcodeData);
-            Serial.println(F("Modulated data:"));
-            Serial.println(modulatedValues);
+  if (!readingActive) {
+    static bool processed = false;
+    if (!processed) {
+      processBarcode();
+      Serial.println(F("Raw data:"));
+      Serial.println(barcodeData);
+      Serial.println(F("Modulated data:"));
+      Serial.println(modulatedValues);
 
-            String beginning = modulatedValues.substring(0, 3);
-
-            String digit1 = modulatedValues.substring(3, 10);
-            int decimaldigit1 = convertInput(digit1, true);
-            if (decimaldigit1 == -1) {
-                Serial.println(F("Error: No match found for digit1"));
-            } else {
-                Serial.println(decimaldigit1);
-            }
-
-            String digit2 = modulatedValues.substring(10, 17);
-            int decimaldigit2 = convertInput(digit2, true);
-            if (decimaldigit2 == -1) {
-                Serial.println(F("Error: No match found for digit2"));
-            } else {
-                Serial.println(decimaldigit2);
-            }
-
-            String digit3 = modulatedValues.substring(17, 24);
-            int decimaldigit3 = convertInput(digit3, true);
-            if (decimaldigit3 == -1) {
-                Serial.println(F("Error: No match found for digit3"));
-            } else {
-                Serial.println(decimaldigit3);
-            }
-
-            String digit4 = modulatedValues.substring(24, 31);
-            int decimaldigit4 = convertInput(digit4, true);
-            if (decimaldigit4 == -1) {
-                Serial.println(F("Error: No match found for digit4"));
-            } else {
-                Serial.println(decimaldigit4);
-            }
-
-            String middle = modulatedValues.substring(31, 36);
-
-            String digit5 = modulatedValues.substring(36, 43);
-            int decimaldigit5 = convertInput(digit5, false);
-            if (decimaldigit5 == -1) {
-                Serial.println(F("Error: No match found for digit5"));
-            } else {
-                Serial.println(decimaldigit5);
-            }
-
-            String digit6 = modulatedValues.substring(43, 50);
-            int decimaldigit6 = convertInput(digit6, false);
-            if (decimaldigit6 == -1) {
-                Serial.println(F("Error: No match found for digit6"));
-            } else {
-                Serial.println(decimaldigit6);
-            }
-
-            String digit7 = modulatedValues.substring(50, 57);
-            int decimaldigit7 = convertInput(digit7, false);
-            if (decimaldigit7 == -1) {
-                Serial.println(F("Error: No match found for digit7"));
-            } else {
-                Serial.println(decimaldigit7);
-            }
-
-            String digit8 = modulatedValues.substring(57, 64);
-            int decimaldigit8 = convertInput(digit8, false);
-            if (decimaldigit8 == -1) {
-                Serial.println(F("Error: No match found for digit8"));
-            } else {
-                Serial.println(decimaldigit8);
-            }
-
-            String finaloutput = String(decimaldigit1) + String(decimaldigit2) + String(decimaldigit3) + String(decimaldigit4) + String(decimaldigit5) + String(decimaldigit6) + String(decimaldigit7) + String(decimaldigit8);
-            displayDecodedBarcode(finaloutput);
-            String end = modulatedValues.substring(64, 67);
-            processed = true;
-        }
+      // Only proceed if we have a valid modulated data length.
+      if (modulatedValues.length() < 67) {
+        Serial.println(F("Error: Not enough modulated data to decode barcode."));
+        processed = true;
         return;
+      }
+
+      String digit1 = modulatedValues.substring(3, 10);
+      int decimaldigit1 = convertInput(digit1, true);
+      if (decimaldigit1 == -1)
+        Serial.println(F("Error: No match found for digit1"));
+      else
+        Serial.println(decimaldigit1);
+
+      String digit2 = modulatedValues.substring(10, 17);
+      int decimaldigit2 = convertInput(digit2, true);
+      if (decimaldigit2 == -1)
+        Serial.println(F("Error: No match found for digit2"));
+      else
+        Serial.println(decimaldigit2);
+
+      String digit3 = modulatedValues.substring(17, 24);
+      int decimaldigit3 = convertInput(digit3, true);
+      if (decimaldigit3 == -1)
+        Serial.println(F("Error: No match found for digit3"));
+      else
+        Serial.println(decimaldigit3);
+
+      String digit4 = modulatedValues.substring(24, 31);
+      int decimaldigit4 = convertInput(digit4, true);
+      if (decimaldigit4 == -1)
+        Serial.println(F("Error: No match found for digit4"));
+      else
+        Serial.println(decimaldigit4);
+
+      String digit5 = modulatedValues.substring(36, 43);
+      int decimaldigit5 = convertInput(digit5, false);
+      if (decimaldigit5 == -1)
+        Serial.println(F("Error: No match found for digit5"));
+      else
+        Serial.println(decimaldigit5);
+
+      String digit6 = modulatedValues.substring(43, 50);
+      int decimaldigit6 = convertInput(digit6, false);
+      if (decimaldigit6 == -1)
+        Serial.println(F("Error: No match found for digit6"));
+      else
+        Serial.println(decimaldigit6);
+
+      String digit7 = modulatedValues.substring(50, 57);
+      int decimaldigit7 = convertInput(digit7, false);
+      if (decimaldigit7 == -1)
+        Serial.println(F("Error: No match found for digit7"));
+      else
+        Serial.println(decimaldigit7);
+
+      String digit8 = modulatedValues.substring(57, 64);
+      int decimaldigit8 = convertInput(digit8, false);
+      if (decimaldigit8 == -1)
+        Serial.println(F("Error: No match found for digit8"));
+      else
+        Serial.println(decimaldigit8);
+
+      String finaloutput = String(decimaldigit1) + String(decimaldigit2) + 
+                           String(decimaldigit3) + String(decimaldigit4) +
+                           String(decimaldigit5) + String(decimaldigit6) +
+                           String(decimaldigit7) + String(decimaldigit8);
+      displayDecodedBarcode(finaloutput);
+      processed = true;
     }
+    return;
+  }
 
-    const uint16_t sensorReading = (RCTime(QTI_PIN) + RCTime(QTI_PIN1) + RCTime(QTI_PIN2)) / 3;
-    barcodeData += (sensorReading < SENSOR_THRESHOLD) ? "0" : "1";
+  // Read sensor data and append to barcodeData
+  uint16_t sensorReading = (RCTime(QTI_PIN) + RCTime(QTI_PIN1) + RCTime(QTI_PIN2)) / 3;
+  barcodeData += (sensorReading < SENSOR_THRESHOLD) ? "0" : "1";
 
-    if (sensorReading < SENSOR_THRESHOLD) {
-        if (++zeroCount >= ZERO_THRESHOLD) {
-            readingActive = false;
-            stopMotors();
-            return;
-        }
-    } else {
-        zeroCount = 0;
+  if (sensorReading < SENSOR_THRESHOLD) {
+    if (++zeroCount >= ZERO_THRESHOLD) {
+      readingActive = false;
+      stopMotors();
+      return;
     }
+  } else {
+    zeroCount = 0;
+  }
 
-    moveForward();
-    delay(SAMPLE_DELAY);
+  moveForward();
+  delay(SAMPLE_DELAY);
 }
 
 inline void moveForward() {
-    right.writeMicroseconds(1520);
-    left.writeMicroseconds(1465);
+  right.writeMicroseconds(1520);
+  left.writeMicroseconds(1466);
 }
 
 inline void stopMotors() {
-    right.writeMicroseconds(1500);
-    left.writeMicroseconds(1500);
+  right.writeMicroseconds(1500);
+  left.writeMicroseconds(1500);
 }
-
-
