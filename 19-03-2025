@@ -1,0 +1,382 @@
+#include <Servo.h>
+#include <FastLED.h>
+#include <LiquidCrystal.h>
+
+#define LED_PIN     6
+#define NUM_LEDS    1
+#define BRIGHTNESS  255
+CRGB leds[NUM_LEDS];
+
+// Pin definitions
+const uint8_t LEFT_SERVO_PIN = 12;
+const uint8_t RIGHT_SERVO_PIN = 13;
+const uint8_t QTI_PIN = 2;
+const uint8_t QTI_PIN1 = 3;
+const uint8_t QTI_PIN2 = 5;
+
+// Constants
+const uint8_t ZERO_THRESHOLD = 50;
+const uint8_t SAMPLE_DELAY = 40;
+const uint16_t SENSOR_THRESHOLD = 100;
+
+// Global variables
+Servo left, right;
+uint8_t zeroCount = 0;
+bool readingActive = true;
+String barcodeData = "";    // Raw binary values
+String modulatedValues = ""; // Processed barcode data
+String prevSegment = "0";
+float prevBit = 0;
+
+// Initialize the LCD with the correct pins
+// RS, EN, D4, D5, D6, D7
+LiquidCrystal lcd(13, 12, 10, 9, 8, 7);
+
+// Barcode lookup tables
+String table1[10] = {"0001101", "0011001", "0010011", "0111101", "0100011", "0110001", "0101111", "0111011", "0110111", "0001011"};
+String table2[10] = {"1110010", "1100110", "1101100", "1000010", "1011100", "1001110", "1010000", "1000100", "1001000", "1110100"};
+
+void setup() {
+    Serial.begin(9600);
+    left.attach(LEFT_SERVO_PIN);
+    right.attach(RIGHT_SERVO_PIN);
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(BRIGHTNESS);
+    leds[0] = CRGB(255, 255, 255);
+    FastLED.show();
+    stopMotors();
+    delay(1000);
+    lcd.begin(16, 2);
+}
+
+inline uint16_t RCTime(const uint8_t sensorPin) {
+    uint16_t duration = 0;
+    pinMode(sensorPin, OUTPUT);
+    digitalWrite(sensorPin, HIGH);
+    delay(1);
+    pinMode(sensorPin, INPUT);
+    while (digitalRead(sensorPin) && duration < 1000) duration++;
+    return duration;
+}
+
+char getMedianValue(String segment) {
+    float ones = 0;
+    for (unsigned int i = 0; i < segment.length(); i++) {
+        if (segment.charAt(i) == '1') ones++;
+    }
+
+
+    // If even, if more than half are ones, or if amt of ones = half string length and last 3 digits are ones and !(last digit of prev was 0 and first 3 of cur are 0 and prev bit was 1), return '1'
+    // If odd, if more than half are ones, or the middle 3 digits are ones/zeroes, or the last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0, return '1'
+    // all based on data
+    int mybit = ( (oddOrEven(segment.length()) == 0                                                           // check if even
+    && (ones > segment.length()/2                                                                           // more than half are ones
+    || (ones == segment.length()/2) && segment.substring(3) == "111"                                        // half are ones, last 3 are 1s
+    || segment.substring(2) == "1111"
+    || (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == 1)             // last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0
+    && !(segment.substring(0,2) == "000" && prevBit == 1 && getLastCharacter(prevSegment) == 0)) )           // opposite of (last digit of prev was 0 and first 3 of cur are 0 and prev bit was 1)
+    ||  
+    ((oddOrEven(segment.length()) == 1                                                                      // check if odd
+    && ones > segment.length()/2)                                                                           // more than half are ones
+    || (segment.substring(2) == "11100")                                                                    // middle 3 are ones
+    || (segment.substring(0, 2) == "111" && prevBit == 0 && getLastCharacter(prevSegment) == 1)             // last digit of prev was 1 and first 3 of cur are 1 and prev bit was 0
+    && !(segment.substring(2) == "00011")
+    && !(segment.substring(0,2) = "000" && prevBit == 1 && getLastCharacter(prevSegment) == 0)) ) ? '1' : '0';                                                   // opposite of (middle 3 are zeroes), return 1 else return 0
+
+    prevSegment = segment;
+    prevBit = mybit;
+    return (mybit);
+}
+
+int oddOrEven(int segmentlength) {
+    if (segmentlength % 2) {
+        return 1; // odd
+    } else {
+        return 0; // even
+    }
+}
+
+int getLastCharacter(String str) {
+    int length = str.length();
+    if (length > 0) {
+        return str[length - 1];
+    }
+    return '\0';
+}
+
+void processBarcode() {
+    // Find first significant 1
+    int startPos = 0;
+    while (startPos < barcodeData.length() && barcodeData.charAt(startPos) == '0') {
+        startPos++;
+    }
+
+    // Find last significant 1
+    int endPos = barcodeData.length() - 1;
+    while (endPos >= 0 && barcodeData.charAt(endPos) == '0') {
+        endPos--;
+    }
+    endPos++; // Include the position after last 1
+
+    // Calculate unit length from valid data
+    float unitLength = (float)(endPos - startPos) / 67.0;
+    Serial.print(F("Start position: "));
+    Serial.println(startPos);
+    Serial.print(F("End position: "));
+    Serial.println(endPos);
+    Serial.print(F("Unit length: "));
+    Serial.println(unitLength);
+
+    // Only process if we have enough data
+    if (unitLength < 1.0 || startPos >= endPos) {
+        Serial.println(F("Invalid data length"));
+        return;
+    }
+
+    modulatedValues = "";
+    for (int i = 0; i < 67; i++) {
+        int segStart = startPos + (int)(i * unitLength);
+        int segEnd = startPos + (int)((i + 1) * unitLength);
+
+        if (segEnd > endPos) segEnd = endPos;
+        String segment = barcodeData.substring(segStart, segEnd);
+        modulatedValues += getMedianValue(segment);
+
+        // Debug output
+        Serial.print(F("Segment "));
+        Serial.print(i);
+        Serial.print(F(" ("));
+        Serial.print(segStart);
+        Serial.print(F("-"));
+        Serial.print(segEnd);
+        Serial.print(F("): "));
+        Serial.print(segment);
+        Serial.print(F(" -> "));
+        Serial.println(getMedianValue(segment));
+    }
+}
+
+int hammingDistance(String a, String b) {
+    int distance = 0;
+    for (int i = 0; i < a.length(); i++) {
+        if (a.charAt(i) != b.charAt(i)) {
+            distance++;
+        }
+    }
+    return distance;
+}
+
+int convertInput(String input, bool useTable1, int confidenceThreshold = 2) {
+    // Determine which table to use
+    String *table = useTable1 ? table1 : table2;
+    int myvalue = -1;
+    int bestMatchIndex = -1;
+    int bestDistance = input.length() + 1; // Initialize with a value larger than possible
+
+   for (int i = 0; i < 10; i++) {
+      if (input == table[i]) {
+      myvalue = i;
+       break;  // Return the matching decimal value
+      } else {
+        myvalue = -1;  // Return -1 if no match found
+      }
+    }
+
+    // Compare input with table entries to find the closest match
+    if (myvalue == -1) {
+      for (int i = 0; i < 10; i++) {
+         int distance = hammingDistance(input, table[i]);
+          if (distance < bestDistance) {
+              bestDistance = distance;
+              bestMatchIndex = i;
+          }
+      }
+
+    // If the best match is within the confidence threshold, return the corresponding value
+      if (myvalue == -1 && bestDistance <= confidenceThreshold) {
+          return bestMatchIndex;
+      } else {
+          return -1; // No match found within the confidence threshold
+      }
+    } else {
+      return myvalue;
+    }
+}
+
+void displayDecodedBarcode(String barcode) {
+    // Extract the checksum (last digit of the barcode)
+    char checksum = barcode[7];
+
+    // Clear the LCD and display the full barcode
+    lcd.clear();
+    lcd.setCursor(0, 0); // Set cursor to first row, first column
+    lcd.print("Barcode: ");
+    lcd.print(barcode);
+
+    // Display the checksum on the second row
+    lcd.setCursor(0, 1); // Set cursor to second row, first column
+    lcd.print("Checksum: ");
+    lcd.print(checksum);
+
+    // Wait for 10 seconds
+    delay(10000);
+
+    // Clear the screen and display "Event complete !!!"
+    lcd.clear();
+    lcd.setCursor(0, 0); // Set cursor to first row, first column
+    lcd.print("Event complete !!!");
+}
+
+void loop() {
+
+
+    if (!readingActive) {
+        static bool processed = false;
+        if (!processed) {
+            processBarcode();
+            Serial.println(F("Raw data:"));
+            Serial.println(barcodeData);
+            Serial.println(F("Modulated data:"));
+            Serial.println(modulatedValues);
+
+            String beginning = modulatedValues.substring(0, 3);
+
+            String digit1 = modulatedValues.substring(3, 10);
+            int decimaldigit1 = convertInput(digit1, true);
+            if (decimaldigit1 == -1) {
+                Serial.println(F("Error: No match found for digit1"));
+            } else {
+                Serial.println(decimaldigit1);
+            }
+
+            String digit2 = modulatedValues.substring(10, 17);
+            int decimaldigit2 = convertInput(digit2, true);
+            if (decimaldigit2 == -1) {
+                Serial.println(F("Error: No match found for digit2"));
+            } else {
+                Serial.println(decimaldigit2);
+            }
+
+            String digit3 = modulatedValues.substring(17, 24);
+            int decimaldigit3 = convertInput(digit3, true);
+            if (decimaldigit3 == -1) {
+                Serial.println(F("Error: No match found for digit3"));
+            } else {
+                Serial.println(decimaldigit3);
+            }
+
+            String digit4 = modulatedValues.substring(24, 31);
+            int decimaldigit4 = convertInput(digit4, true);
+            if (decimaldigit4 == -1) {
+                Serial.println(F("Error: No match found for digit4"));
+            } else {
+                Serial.println(decimaldigit4);
+            }
+
+            String middle = modulatedValues.substring(31, 36);
+
+            String digit5 = modulatedValues.substring(36, 43);
+            int decimaldigit5 = convertInput(digit5, false);
+            if (decimaldigit5 == -1) {
+                Serial.println(F("Error: No match found for digit5"));
+            } else {
+                Serial.println(decimaldigit5);
+            }
+
+            String digit6 = modulatedValues.substring(43, 50);
+            int decimaldigit6 = convertInput(digit6, false);
+            if (decimaldigit6 == -1) {
+                Serial.println(F("Error: No match found for digit6"));
+            } else {
+                Serial.println(decimaldigit6);
+            }
+
+            String digit7 = modulatedValues.substring(50, 57);
+            int decimaldigit7 = convertInput(digit7, false);
+            if (decimaldigit7 == -1) {
+                Serial.println(F("Error: No match found for digit7"));
+            } else {
+                Serial.println(decimaldigit7);
+            }
+
+            String digit8 = modulatedValues.substring(57, 64);
+            int decimaldigit8 = convertInput(digit8, false);
+            if (decimaldigit8 == -1) {
+                Serial.println(F("Error: No match found for digit8"));
+            } else {
+                Serial.println(decimaldigit8);
+            }
+
+            Serial.println(digit1);
+            Serial.println(digit2);
+            Serial.println(digit3);
+            Serial.println(digit4);
+            Serial.println(digit5);
+            Serial.println(digit6);
+            Serial.println(digit7);
+            Serial.println(digit8);
+
+            int checksum = calculateChecksum(decimaldigit1, decimaldigit2, decimaldigit3, decimaldigit4, decimaldigit5, decimaldigit6, decimaldigit7);
+            Serial.print("Checksum: ");
+            Serial.println(checksum);
+
+            
+            if (checksum == decimaldigit8) {
+            Serial.println("Checksum Confirmed!");  // Print confirmation and move to a new line
+            Serial.print("Barcode read as: ");
+
+            // Printing all digits as a sequence
+            Serial.print(decimaldigit1);
+            Serial.print(decimaldigit2);
+            Serial.print(decimaldigit3);
+            Serial.print(decimaldigit4);
+            Serial.print(decimaldigit5);
+            Serial.print(decimaldigit6);
+            Serial.print(decimaldigit7);
+            Serial.println(decimaldigit8); // Using `println()` to move to a new line 
+            processed = true; 
+            }
+
+            else {
+              Serial.print("Read wrong or backwards");
+              processed = true;
+            } 
+        }
+        return;
+    }
+
+    const uint16_t sensorReading = (RCTime(QTI_PIN) + RCTime(QTI_PIN1) + RCTime(QTI_PIN2)) / 3;
+    barcodeData += (sensorReading < SENSOR_THRESHOLD) ? "0" : "1";
+
+    if (sensorReading < SENSOR_THRESHOLD) {
+        if (++zeroCount >= ZERO_THRESHOLD) {
+            readingActive = false;
+            stopMotors();
+            return;
+        }
+    } else {
+        zeroCount = 0;
+    }
+
+    moveForward();
+    delay(SAMPLE_DELAY);
+}
+
+inline void moveForward() {
+    right.writeMicroseconds(1516);
+    left.writeMicroseconds(1480);
+}
+
+inline void stopMotors() {
+    right.writeMicroseconds(1496);
+    left.writeMicroseconds(1500);
+}
+
+// checksum calculation function
+int calculateChecksum(int digit1, int digit2, int digit3, int digit4, int digit5, int digit6, int digit7) { 
+  int oddSum = digit1 + digit3 + digit5 + digit7, evenSum = digit2 + digit4 + digit6;
+  
+  // Calculate the checksum
+  int checksum = (10 - ((3 * oddSum + evenSum) % 10)) % 10;
+  return checksum;
+}
